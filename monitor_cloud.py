@@ -125,6 +125,7 @@ TIMES = [
             "jovem", "jovens",
         ],
         "exclui_urls": ["/feminino/", "/women/", "/sub-", "/base/", "/academy/", "women", "feminino"],
+        "exclui_categorias": ["Chelsea FC Women", "Academia"],
         "fontes": [
             {"url": "https://www.chelseafcbrasil.com/feed/",
              "tipo": "rss",  "filtrar": False},
@@ -249,11 +250,13 @@ def buscar_rss(url: str) -> list[dict]:
         ident = e.get("id") or e.get("link", "")
         if not ident:
             continue
+        categorias = [t.get("term", "") for t in e.get("tags", [])]
         artigos.append({
-            "id":     ident,
-            "titulo": e.get("title", "").strip(),
-            "link":   e.get("link", ""),
-            "data":   e.get("published_parsed"),
+            "id":         ident,
+            "titulo":     e.get("title", "").strip(),
+            "link":       e.get("link", ""),
+            "data":       e.get("published_parsed"),
+            "categorias": categorias,
         })
     return artigos
 
@@ -476,8 +479,9 @@ def calcular_score(artigo: dict, time_info: dict) -> int:
 #   FILTROS
 # ─────────────────────────────────────────────────────────────
 def passa_filtros(artigo: dict, time_info: dict, aplicar_palavras: bool) -> bool:
-    titulo = artigo.get("titulo", "").lower()
-    link   = artigo.get("link", "").lower()
+    titulo     = artigo.get("titulo", "").lower()
+    link       = artigo.get("link", "").lower()
+    categorias = [c.lower() for c in artigo.get("categorias", [])]
 
     if aplicar_palavras:
         chaves = time_info.get("palavras_chave", [])
@@ -490,6 +494,10 @@ def passa_filtros(artigo: dict, time_info: dict, aplicar_palavras: bool) -> bool
 
     for exc_url in time_info.get("exclui_urls", []):
         if exc_url.lower() in link:
+            return False
+
+    for exc_cat in time_info.get("exclui_categorias", []):
+        if any(exc_cat.lower() in cat for cat in categorias):
             return False
 
     if not dentro_da_janela(artigo.get("data")):
