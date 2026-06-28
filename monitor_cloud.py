@@ -91,7 +91,9 @@ TIMES = [
             "base", "categoria de base", "infantil", "juvenil", "junior", "júnior",
             "women", "woman", "girl", "girls", "ladies", "WSL", "academy",
             "u21", "u20", "u18", "u17", "u16", "u15", "u14", "U-", "equipe B", "reservas",
+            "jovem", "jovens",
         ],
+        "exclui_urls": ["/feminino/", "/women/", "/sub-", "/base/", "/academy/"],
         "fontes": [
             # ── RSS (preferencial) ──────────────────────────
             {"url": "https://ge.globo.com/dynamo/globoesporte/futebol/times/rss20/avai.xml",
@@ -120,7 +122,9 @@ TIMES = [
             "base", "categoria de base", "infantil", "juvenil", "junior", "júnior",
             "women", "woman", "girl", "girls", "ladies", "WSL", "academy",
             "u21", "u20", "u18", "u17", "u16", "u15", "u14", "U-", "equipe B", "reservas",
+            "jovem", "jovens",
         ],
+        "exclui_urls": ["/feminino/", "/women/", "/sub-", "/base/", "/academy/", "women", "feminino"],
         "fontes": [
             {"url": "https://www.chelseafcbrasil.com/feed/",
              "tipo": "rss",  "filtrar": False},
@@ -473,6 +477,7 @@ def calcular_score(artigo: dict, time_info: dict) -> int:
 # ─────────────────────────────────────────────────────────────
 def passa_filtros(artigo: dict, time_info: dict, aplicar_palavras: bool) -> bool:
     titulo = artigo.get("titulo", "").lower()
+    link   = artigo.get("link", "").lower()
 
     if aplicar_palavras:
         chaves = time_info.get("palavras_chave", [])
@@ -481,6 +486,10 @@ def passa_filtros(artigo: dict, time_info: dict, aplicar_palavras: bool) -> bool
 
     for exc in time_info.get("exclui_palavras", []):
         if exc.lower() in titulo:
+            return False
+
+    for exc_url in time_info.get("exclui_urls", []):
+        if exc_url.lower() in link:
             return False
 
     if not dentro_da_janela(artigo.get("data")):
