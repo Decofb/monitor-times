@@ -42,6 +42,10 @@ TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "").strip()
 if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
     sys.exit("Defina TELEGRAM_TOKEN e TELEGRAM_CHAT_ID como GitHub Secrets.")
 
+# Proxy Cloudflare Worker — contorna bloqueios de IP do GitHub Actions
+PROXY_URL    = "https://monitor-proxy.brandes-andre1.workers.dev"
+PROXY_SECRET = os.environ.get("PROXY_SECRET", "").strip()
+
 JANELA_HORAS  = 4     # só envia notícias publicadas nas últimas 4 h
 MAX_POR_CICLO = 6     # máximo de alertas por time por execução
 MAX_HIST      = 500   # máximo de IDs guardados por time no já_visto.json
@@ -212,11 +216,29 @@ def tempo_relativo(data) -> str:
 
 
 # ─────────────────────────────────────────────────────────────
+#   FETCH VIA PROXY (Cloudflare Worker)
+# ─────────────────────────────────────────────────────────────
+def _fetch(url: str) -> requests.Response:
+    """Faz GET via Cloudflare Worker proxy se PROXY_SECRET estiver definido,
+    ou diretamente caso contrário (útil para testes locais)."""
+    if PROXY_SECRET:
+        resp = requests.get(
+            PROXY_URL,
+            params={"url": url},
+            headers={**HEADERS, "X-Proxy-Token": PROXY_SECRET},
+            timeout=TIMEOUT,
+        )
+    else:
+        resp = requests.get(url, headers=HEADERS, timeout=TIMEOUT)
+    resp.raise_for_status()
+    return resp
+
+
+# ─────────────────────────────────────────────────────────────
 #   BUSCA RSS
 # ─────────────────────────────────────────────────────────────
 def buscar_rss(url: str) -> list[dict]:
-    resp = requests.get(url, headers=HEADERS, timeout=TIMEOUT)
-    resp.raise_for_status()
+    resp = _fetch(url)
     feed = feedparser.parse(resp.content)
     artigos = []
     for e in feed.entries:
@@ -343,8 +365,7 @@ def _normalizar_url(href: str, base_url: str, dominio: str) -> str | None:
 
 def buscar_html(url: str) -> list[dict]:
     """Scraping genérico: extrai artigos (título + link + data opcional)."""
-    resp = requests.get(url, headers=HEADERS, timeout=TIMEOUT)
-    resp.raise_for_status()
+    resp = _fetch(url)
 
     try:
         soup = BeautifulSoup(resp.content, "lxml")
