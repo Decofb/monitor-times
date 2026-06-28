@@ -32,10 +32,10 @@ jobs:
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         run: python monitor_cloud.py
 
-      - name: Salvar memória (já_visto.json)
+      - name: Salvar memória e log
         run: |
           git config user.name  "Monitor Bot"
           git config user.email "monitor@github-actions"
-          git add já_visto.json
-          git diff --staged --quiet || git commit -m "chore: atualiza já_visto.json [skip ci]"
-          git push
+          git add já_visto.json log.txt || true
+          git diff --staged --quiet || git commit -m "chore: atualiza memória e log [skip ci]"
+          git pull --rebase && git push

@@ -42,7 +42,7 @@ TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "").strip()
 if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
     sys.exit("Defina TELEGRAM_TOKEN e TELEGRAM_CHAT_ID como GitHub Secrets.")
 
-JANELA_HORAS  = 2     # só envia notícias publicadas nas últimas 2 h
+JANELA_HORAS  = 4     # só envia notícias publicadas nas últimas 4 h
 MAX_POR_CICLO = 6     # máximo de alertas por time por execução
 MAX_HIST      = 500   # máximo de IDs guardados por time no já_visto.json
 TIMEOUT       = 20
@@ -58,6 +58,7 @@ HEADERS = {
 
 BASE_DIR  = Path(__file__).resolve().parent
 MEMORIA_F = BASE_DIR / "já_visto.json"
+LOG_F     = BASE_DIR / "log.txt"
 
 logging.basicConfig(
     level=logging.INFO,
@@ -95,6 +96,8 @@ TIMES = [
              "tipo": "rss",  "filtrar": False},
             {"url": "https://avai.com.br/noticias/feed/",
              "tipo": "rss",  "filtrar": False},
+            {"url": "https://ge.globo.com/futebol/transferencias/rss20/index.xml",
+             "tipo": "rss",  "filtrar": True},
             # ── HTML (complemento) ──────────────────────────
             {"url": "https://ge.globo.com/sc/futebol/times/avai/",
              "tipo": "html", "filtrar": True},
@@ -117,6 +120,8 @@ TIMES = [
         "fontes": [
             {"url": "https://www.chelseafcbrasil.com/feed/",
              "tipo": "rss",  "filtrar": False},
+            {"url": "https://ge.globo.com/futebol/transferencias/rss20/index.xml",
+             "tipo": "rss",  "filtrar": True},
             {"url": "https://www.chelseafcbrasil.com",
              "tipo": "html", "filtrar": True},
             {"url": "https://www.ogol.com.br/equipe/chelsea/noticias",
@@ -401,6 +406,48 @@ def buscar_html(url: str) -> list[dict]:
 
 
 # ─────────────────────────────────────────────────────────────
+#   DEDUPLICAÇÃO POR TÍTULO
+# ─────────────────────────────────────────────────────────────
+_STOP_WORDS = {
+    "o", "a", "de", "do", "da", "em", "no", "na", "e", "é", "os", "as",
+    "dos", "das", "nos", "nas", "um", "uma", "por", "para", "com", "se",
+    "que", "ao", "à", "ou", "the", "an", "of", "in", "to", "and", "for",
+    "on", "at", "is", "are", "was", "were", "be", "been",
+}
+
+
+def _palavras(titulo: str) -> set:
+    return {w for w in re.findall(r'\w+', titulo.lower())
+            if w not in _STOP_WORDS and len(w) > 2}
+
+
+def _similar(t1: str, t2: str, limiar: float = 0.8) -> bool:
+    p1, p2 = _palavras(t1), _palavras(t2)
+    if not p1 or not p2:
+        return False
+    return len(p1 & p2) / max(len(p1), len(p2)) >= limiar
+
+
+def dedup_titulos(artigos: list) -> list:
+    """Remove artigos cujo título é ≥80% similar a um já aceito no ciclo."""
+    resultado = []
+    for art in artigos:
+        if not any(_similar(art["titulo"], prev["titulo"]) for prev in resultado):
+            resultado.append(art)
+    return resultado
+
+
+# ─────────────────────────────────────────────────────────────
+#   SCORE DE RELEVÂNCIA
+# ─────────────────────────────────────────────────────────────
+def calcular_score(artigo: dict, time_info: dict) -> int:
+    """2 se o título menciona palavras_chave do time; 1 caso contrário."""
+    titulo = artigo.get("titulo", "").lower()
+    chaves = time_info.get("palavras_chave", [])
+    return 2 if any(p.lower() in titulo for p in chaves) else 1
+
+
+# ─────────────────────────────────────────────────────────────
 #   FILTROS
 # ─────────────────────────────────────────────────────────────
 def passa_filtros(artigo: dict, time_info: dict, aplicar_palavras: bool) -> bool:
@@ -446,30 +493,36 @@ def _traduzir_para_pt(titulo: str) -> str:
 #   TELEGRAM
 # ─────────────────────────────────────────────────────────────
 def montar_mensagem(time_info: dict, artigo: dict) -> str:
-    titulo_original  = artigo["titulo"]
-    titulo_exibido   = _traduzir_para_pt(titulo_original)
-    # Se houve tradução, mostra o original entre parênteses
+    titulo_original = artigo["titulo"]
+    titulo_exibido  = _traduzir_para_pt(titulo_original)
     if titulo_exibido.lower().strip() != titulo_original.lower().strip():
-        titulo_linha = f"{html_lib.escape(titulo_exibido)}"
+        titulo_linha = html_lib.escape(titulo_exibido)
     else:
         titulo_linha = html_lib.escape(titulo_original)
     return (
         f"{time_info['emoji']} <b>{html_lib.escape(time_info['nome'])}</b>\n"
         f"📰 {titulo_linha}\n"
-        f"🔗 {html_lib.escape(artigo['link'])}\n"
         f"⏰ {tempo_relativo(artigo['data'])}"
     )
 
 
-def enviar_telegram(texto: str):
+def enviar_telegram(texto: str, link: str = ""):
+    teclado = json.dumps({
+        "inline_keyboard": [[{"text": "📰 Abrir notícia", "url": link}]]
+    }) if link else None
+
+    payload = {
+        "chat_id":                  TELEGRAM_CHAT_ID,
+        "text":                     texto,
+        "parse_mode":               "HTML",
+        "disable_web_page_preview": True,
+    }
+    if teclado:
+        payload["reply_markup"] = teclado
+
     r = requests.post(
         f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
-        data={
-            "chat_id":                  TELEGRAM_CHAT_ID,
-            "text":                     texto,
-            "parse_mode":               "HTML",
-            "disable_web_page_preview": True,
-        },
+        data=payload,
         timeout=TIMEOUT,
     )
     dados = r.json()
@@ -503,9 +556,11 @@ def salvar_memoria(mem: dict):
 # ─────────────────────────────────────────────────────────────
 def verificar_time(time_info: dict, memoria: dict) -> int:
     nome       = time_info["nome"]
+    emoji      = time_info["emoji"]
     vistos     = memoria.setdefault(nome, [])
     vistos_set = set(vistos)
     encontrados: dict[str, dict] = {}
+    total_brutos = 0
 
     for fonte in time_info["fontes"]:
         url              = fonte["url"]
@@ -514,6 +569,7 @@ def verificar_time(time_info: dict, memoria: dict) -> int:
 
         try:
             artigos = buscar_rss(url) if tipo == "rss" else buscar_html(url)
+            total_brutos += len(artigos)
             log.info("    %s → %d artigo(s) bruto(s)", url, len(artigos))
         except requests.HTTPError as e:
             code = e.response.status_code if e.response else "?"
@@ -532,14 +588,26 @@ def verificar_time(time_info: dict, memoria: dict) -> int:
                 continue
             if not passa_filtros(art, time_info, aplicar_palavras):
                 continue
+            art["score"] = calcular_score(art, time_info)
             encontrados[aid] = art
 
-    # Mais recente primeiro
-    novas = sorted(
+    # Alerta se todas as fontes falharam
+    if total_brutos == 0:
+        log.warning("  ⚠ %s %s: todas as fontes falharam neste ciclo.", emoji, nome)
+        try:
+            enviar_telegram(f"⚠️ {emoji} <b>{html_lib.escape(nome)}</b>: todas as fontes falharam neste ciclo.")
+        except Exception as e:
+            log.error("    ✗ Telegram (alerta falha): %s", e)
+        return 0
+
+    # Ordena por score desc, depois data desc
+    novas = dedup_titulos(sorted(
         encontrados.values(),
-        key=lambda a: to_utc(a["data"]) or datetime.min.replace(tzinfo=timezone.utc),
-        reverse=True,
-    )
+        key=lambda a: (
+            -(a.get("score", 1)),
+            -(to_utc(a["data"]) or datetime.min.replace(tzinfo=timezone.utc)).timestamp(),
+        ),
+    ))
 
     enviadas = 0
     for art in novas:
@@ -548,7 +616,7 @@ def verificar_time(time_info: dict, memoria: dict) -> int:
                      MAX_POR_CICLO, len(novas) - enviadas)
             break
         try:
-            enviar_telegram(montar_mensagem(time_info, art))
+            enviar_telegram(montar_mensagem(time_info, art), link=art.get("link", ""))
             vistos.append(art["id"])
             enviadas += 1
             time.sleep(1)
@@ -556,20 +624,35 @@ def verificar_time(time_info: dict, memoria: dict) -> int:
             log.error("    ✗ Telegram: %s", e)
 
     log.info("  %s %s → %d nova(s), %d enviada(s).",
-             time_info["emoji"], nome, len(novas), enviadas)
+             emoji, nome, len(novas), enviadas)
     return enviadas
 
 
-def rodar_ciclo(memoria: dict) -> int:
-    total = 0
+def rodar_ciclo(memoria: dict) -> dict:
+    resultados = {}
     for time_info in TIMES:
         log.info("Verificando %s %s ...", time_info["emoji"], time_info["nome"])
         try:
-            total += verificar_time(time_info, memoria)
+            resultados[time_info["nome"]] = verificar_time(time_info, memoria)
         except Exception as e:
             log.exception("Erro em %s: %s", time_info["nome"], e)
+            resultados[time_info["nome"]] = 0
     salvar_memoria(memoria)
-    return total
+    return resultados
+
+
+def gravar_log(resultados: dict):
+    """Acrescenta uma linha no log.txt com os totais do ciclo."""
+    try:
+        partes = " | ".join(
+            f"{nome.split()[0].capitalize()}: {n}"
+            for nome, n in resultados.items()
+        )
+        linha = f"{agora_utc().strftime('%Y-%m-%d %H:%M')} UTC | {partes}\n"
+        with open(LOG_F, "a", encoding="utf-8") as f:
+            f.write(linha)
+    except Exception as e:
+        log.warning("Não consegui gravar log.txt: %s", e)
 
 
 # ─────────────────────────────────────────────────────────────
@@ -577,10 +660,12 @@ def rodar_ciclo(memoria: dict) -> int:
 # ─────────────────────────────────────────────────────────────
 if __name__ == "__main__":
     log.info("=" * 60)
-    log.info("  MONITOR v2 — ciclo único (GitHub Actions)")
+    log.info("  MONITOR v3 — ciclo único (GitHub Actions)")
     log.info("  %s", agora_utc().strftime("%d/%m/%Y %H:%M:%S UTC"))
     log.info("  Janela: últimas %d horas", JANELA_HORAS)
     log.info("=" * 60)
-    memoria = carregar_memoria()
-    total   = rodar_ciclo(memoria)
+    memoria    = carregar_memoria()
+    resultados = rodar_ciclo(memoria)
+    total      = sum(resultados.values())
+    gravar_log(resultados)
     log.info("Ciclo concluído — %d notícia(s) enviada(s).", total)
