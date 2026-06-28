@@ -1,317 +1,508 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Monitor de notícias — versão cloud (GitHub Actions).
+Monitor de notícias v2 — GitHub Actions.
 
-Roda UM ciclo e sai. O GitHub Actions chama este script a cada 15 minutos via
-cron trigger. O arquivo já_visto.json fica versionado no repositório e é
-atualizado via git commit no final de cada execução pelo workflow.
-
-Configuração: defina TELEGRAM_TOKEN e TELEGRAM_CHAT_ID como GitHub Secrets
-(Settings → Secrets and variables → Actions → New repository secret).
+Mudanças em relação à v1:
+• Fontes específicas por time (lista curada) em vez do Google News RSS
+• Prioriza RSS dos sites; faz scraping HTML como complemento
+• Filtro de 24 h: só notícias publicadas no último dia são enviadas
+• Filtro de palavras-chave em portais genéricos
 """
 
-import os
-import sys
-import json
-import time
-import html
-import logging
+import os, sys, json, time, html as html_lib, logging, re
+from datetime import datetime, timezone, timedelta
 from pathlib import Path
-from datetime import datetime, timezone
-from urllib.parse import quote_plus
+from urllib.parse import urljoin, urlparse
 
-for _stream in (sys.stdout, sys.stderr):
+for _s in (sys.stdout, sys.stderr):
     try:
-        _stream.reconfigure(encoding="utf-8")
+        _s.reconfigure(encoding="utf-8")
     except (AttributeError, ValueError):
         pass
 
 try:
     import feedparser
 except ImportError:
-    sys.exit("feedparser não instalado. Rode: pip install feedparser requests")
+    sys.exit("feedparser não instalado. Rode: pip install -r requirements.txt")
 try:
     import requests
 except ImportError:
-    sys.exit("requests não instalado. Rode: pip install feedparser requests")
+    sys.exit("requests não instalado. Rode: pip install -r requirements.txt")
+try:
+    from bs4 import BeautifulSoup
+except ImportError:
+    sys.exit("beautifulsoup4 não instalado. Rode: pip install -r requirements.txt")
 
-# ============================================================
-#   CONFIG — lê das variáveis de ambiente (GitHub Secrets)
-# ============================================================
+# ─────────────────────────────────────────────────────────────
+#   CONFIGURAÇÃO
+# ─────────────────────────────────────────────────────────────
 TELEGRAM_TOKEN   = os.environ.get("TELEGRAM_TOKEN", "").strip()
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "").strip()
-
 if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
-    sys.exit("TELEGRAM_TOKEN e TELEGRAM_CHAT_ID precisam estar definidos como GitHub Secrets.")
+    sys.exit("Defina TELEGRAM_TOKEN e TELEGRAM_CHAT_ID como GitHub Secrets.")
 
-# ============================================================
-#   TIMES MONITORADOS (idêntico ao monitor.py local)
-# ============================================================
-TIMES = [
-    {
-        "nome": "AVAÍ FC",
-        "emoji": "⚽",
-        "buscas": [
-            ("Avaí Futebol Clube", "pt"),
-            ("Avaí FC", "en"),
-        ],
-    },
-    {
-        "nome": "CHELSEA FC",
-        "emoji": "🔵",
-        "buscas": [
-            ("Chelsea FC", "pt"),
-            ("Chelsea FC", "en"),
-        ],
-    },
-    {
-        "nome": "PITTSBURGH STEELERS",
-        "emoji": "🏈",
-        "buscas": [
-            ("Pittsburgh Steelers", "pt"),
-            ("Pittsburgh Steelers", "en"),
-        ],
-    },
-    {
-        "nome": "LEGACY (CS2)",
-        "emoji": "🎮",
-        "buscas": [
-            ("Legacy CS2 Counter-Strike", "pt"),
-            ('"Legacy" CS2', "en"),
-        ],
-        "exige_no_titulo": ["Legacy"],
-        "exclui_no_titulo": ["Hogwarts", "Tomb Raider", "Plague Tale", "Starfall"],
-    },
-]
+JANELA_HORAS  = 24    # só envia notícias publicadas nas últimas 24 h
+MAX_POR_CICLO = 6     # máximo de alertas por time por execução
+MAX_HIST      = 500   # máximo de IDs guardados por time no já_visto.json
+TIMEOUT       = 20
 
-JANELA_NOTICIAS        = "2d"
-MAX_IDADE_HORAS        = 24
-MAX_NOTICIAS_POR_CICLO = 6
-MAX_HISTORICO_POR_TIME = 400
-TIMEOUT                = 20
-USER_AGENT = (
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-    "(KHTML, like Gecko) Chrome/124.0 Safari/537.36"
-)
+HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/124.0 Safari/537.36"
+    ),
+    "Accept-Language": "pt-BR,pt;q=0.9,en;q=0.8",
+}
 
-BASE_DIR        = Path(__file__).resolve().parent
-ARQUIVO_MEMORIA = BASE_DIR / "já_visto.json"
+BASE_DIR  = Path(__file__).resolve().parent
+MEMORIA_F = BASE_DIR / "já_visto.json"
 
-# ============================================================
-#   LOG — só console (GitHub Actions captura o stdout)
-# ============================================================
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s | %(levelname)s | %(message)s",
     datefmt="%d/%m/%Y %H:%M:%S",
     handlers=[logging.StreamHandler(sys.stdout)],
 )
-log = logging.getLogger("monitor_cloud")
+log = logging.getLogger("monitor")
 
-# ============================================================
-#   MEMÓRIA
-# ============================================================
-def carregar_memoria():
-    if ARQUIVO_MEMORIA.exists():
-        try:
-            with open(ARQUIVO_MEMORIA, "r", encoding="utf-8") as f:
-                dados = json.load(f)
-            return {nome: list(ids) for nome, ids in dados.items()}
-        except (json.JSONDecodeError, OSError) as e:
-            log.warning("Não consegui ler %s (%s). Começando memória vazia.", ARQUIVO_MEMORIA.name, e)
-    return {}
+# ─────────────────────────────────────────────────────────────
+#   FONTES POR TIME
+#
+#   tipo    "rss"  → parse com feedparser (mais confiável)
+#           "html" → scraping genérico com BeautifulSoup
+#   filtrar True   → só inclui artigos cujo título contenha
+#                    palavras_chave do time (usado em portais
+#                    que cobrem vários assuntos)
+# ─────────────────────────────────────────────────────────────
+TIMES = [
+    {
+        "nome": "AVAI FC",
+        "emoji": "⚽",
+        "palavras_chave": ["Avaí", "Avai"],
+        "fontes": [
+            # ── RSS (preferencial) ──────────────────────────
+            {"url": "https://ge.globo.com/dynamo/globoesporte/futebol/times/rss20/avai.xml",
+             "tipo": "rss",  "filtrar": False},
+            {"url": "https://ndmais.com.br/tag/avai/feed/",
+             "tipo": "rss",  "filtrar": False},
+            {"url": "https://avai.com.br/noticias/feed/",
+             "tipo": "rss",  "filtrar": False},
+            # ── HTML (complemento) ──────────────────────────
+            {"url": "https://ge.globo.com/sc/futebol/times/avai/",
+             "tipo": "html", "filtrar": True},
+            {"url": "https://avai.com.br/noticias/",
+             "tipo": "html", "filtrar": True},
+            {"url": "https://ndmais.com.br/tag/avai/",
+             "tipo": "html", "filtrar": True},
+        ],
+    },
+    {
+        "nome": "CHELSEA FC",
+        "emoji": "🔵",
+        "palavras_chave": ["Chelsea"],
+        "fontes": [
+            {"url": "https://www.chelseafcbrasil.com/feed/",
+             "tipo": "rss",  "filtrar": False},
+            {"url": "https://www.chelseafcbrasil.com",
+             "tipo": "html", "filtrar": True},
+            {"url": "https://www.ogol.com.br/equipe/chelsea/noticias",
+             "tipo": "html", "filtrar": True},
+        ],
+    },
+    {
+        "nome": "PITTSBURGH STEELERS",
+        "emoji": "🏈",
+        "palavras_chave": ["Steelers", "Pittsburgh"],
+        "fontes": [
+            {"url": "https://www.steelers.com/rss/news_feed.rss",
+             "tipo": "rss",  "filtrar": False},
+            {"url": "https://steelersdepot.com/feed/",
+             "tipo": "rss",  "filtrar": False},
+            {"url": "https://steelersnow.com/feed/",
+             "tipo": "rss",  "filtrar": False},
+            {"url": "https://www.behindthesteelcurtain.com/rss/current",
+             "tipo": "rss",  "filtrar": False},
+            {"url": "https://www.espn.com.br/nfl/time/_/nome/pit/pittsburgh-steelers",
+             "tipo": "html", "filtrar": True},
+            {"url": "https://www.nfl.com/teams/pittsburgh-steelers/",
+             "tipo": "html", "filtrar": True},
+        ],
+    },
+    {
+        "nome": "LEGACY (CS2)",
+        "emoji": "🎮",
+        "palavras_chave": ["Legacy"],
+        "exclui_palavras": [
+            "Hogwarts", "Tomb Raider", "Plague Tale",
+            "Starfall", "Harry Potter",
+        ],
+        "fontes": [
+            {"url": "https://retakecs.com/noticias/feed/",
+             "tipo": "rss",  "filtrar": True},
+            {"url": "https://www.dust2.com.br/feed/",
+             "tipo": "rss",  "filtrar": True},
+            {"url": "https://retakecs.com/noticias/",
+             "tipo": "html", "filtrar": True},
+            {"url": "https://draft5.gg",
+             "tipo": "html", "filtrar": True},
+            {"url": "https://www.dust2.com.br",
+             "tipo": "html", "filtrar": True},
+        ],
+    },
+]
+
+# ─────────────────────────────────────────────────────────────
+#   UTILITÁRIOS DE TEMPO
+# ─────────────────────────────────────────────────────────────
+def agora_utc() -> datetime:
+    return datetime.now(timezone.utc)
 
 
-def salvar_memoria(memoria):
+def to_utc(data) -> datetime | None:
+    """Converte time.struct_time (feedparser) ou datetime para datetime UTC."""
+    if data is None:
+        return None
+    if isinstance(data, datetime):
+        return data if data.tzinfo else data.replace(tzinfo=timezone.utc)
     try:
-        dados = {nome: ids[-MAX_HISTORICO_POR_TIME:] for nome, ids in memoria.items()}
-        temporario = ARQUIVO_MEMORIA.with_name(ARQUIVO_MEMORIA.name + ".tmp")
-        with open(temporario, "w", encoding="utf-8") as f:
-            json.dump(dados, f, ensure_ascii=False, indent=2)
-        temporario.replace(ARQUIVO_MEMORIA)
-    except OSError as e:
-        log.error("Falha ao salvar a memória: %s", e)
-
-# ============================================================
-#   BUSCA DE NOTÍCIAS
-# ============================================================
-def google_news_url(query, lang):
-    if JANELA_NOTICIAS:
-        query = f"{query} when:{JANELA_NOTICIAS}"
-    q = quote_plus(query)
-    if lang == "en":
-        return f"https://news.google.com/rss/search?q={q}&hl=en-US&gl=US&ceid=US:en"
-    return f"https://news.google.com/rss/search?q={q}&hl=pt-BR&gl=BR&ceid=BR:pt-419"
+        return datetime(*data[:6], tzinfo=timezone.utc)
+    except Exception:
+        return None
 
 
-def buscar_noticias(query, lang):
-    url = google_news_url(query, lang)
-    resp = requests.get(url, headers={"User-Agent": USER_AGENT}, timeout=TIMEOUT)
+def dentro_da_janela(data) -> bool:
+    """True se a data está dentro das últimas JANELA_HORAS horas."""
+    dt = to_utc(data)
+    if dt is None:
+        return True     # sem data → inclui (não descarta por precaução)
+    return (agora_utc() - dt) <= timedelta(hours=JANELA_HORAS)
+
+
+def tempo_relativo(data) -> str:
+    dt = to_utc(data)
+    if dt is None:
+        return "recentemente"
+    seg = int((agora_utc() - dt).total_seconds())
+    if seg < 60:  return "agora mesmo"
+    m = seg // 60
+    if m < 60:    return f"há {m} minuto{'s' if m != 1 else ''}"
+    h = m // 60
+    if h < 24:    return f"há {h} hora{'s' if h != 1 else ''}"
+    d = h // 24
+    return f"há {d} dia{'s' if d != 1 else ''}"
+
+
+# ─────────────────────────────────────────────────────────────
+#   BUSCA RSS
+# ─────────────────────────────────────────────────────────────
+def buscar_rss(url: str) -> list[dict]:
+    resp = requests.get(url, headers=HEADERS, timeout=TIMEOUT)
     resp.raise_for_status()
     feed = feedparser.parse(resp.content)
-    noticias = []
-    for entry in feed.entries:
-        link  = entry.get("link", "")
-        ident = entry.get("id") or link
+    artigos = []
+    for e in feed.entries:
+        ident = e.get("id") or e.get("link", "")
         if not ident:
             continue
-        noticias.append({
-            "id":    ident,
-            "titulo": entry.get("title", "(sem título)"),
-            "link":   link,
-            "data":   entry.get("published_parsed"),
+        artigos.append({
+            "id":     ident,
+            "titulo": e.get("title", "").strip(),
+            "link":   e.get("link", ""),
+            "data":   e.get("published_parsed"),
         })
-    return noticias
+    return artigos
 
-# ============================================================
-#   MENSAGEM DO TELEGRAM
-# ============================================================
-def tempo_relativo(published_parsed):
-    if not published_parsed:
-        return "recentemente"
+
+# ─────────────────────────────────────────────────────────────
+#   BUSCA HTML — scraping genérico
+# ─────────────────────────────────────────────────────────────
+_ISO_RE  = re.compile(
+    r'(\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}(?::\d{2})?(?:[+-]\d{2}:?\d{2}|Z)?)'
+)
+_DATE_RE = re.compile(r'(\d{4}-\d{2}-\d{2}|\d{2}/\d{2}/\d{4})')
+_SKIP_EXT = {".css", ".js", ".png", ".jpg", ".jpeg", ".gif",
+             ".svg", ".ico", ".woff", ".woff2", ".ttf"}
+_SKIP_STR = (
+    "javascript:", "mailto:", "tel:", "whatsapp",
+    "facebook.com", "twitter.com", "instagram.com",
+    "youtube.com", "t.co", "#",
+)
+
+
+def _parse_date_str(s: str) -> datetime | None:
+    s = s.strip().replace("Z", "+00:00")
+    for fmt in (
+        "%Y-%m-%dT%H:%M:%S%z", "%Y-%m-%dT%H:%M%z",
+        "%Y-%m-%d %H:%M:%S",   "%Y-%m-%d",
+        "%d/%m/%Y",
+    ):
+        try:
+            dt = datetime.strptime(s[:25], fmt)
+            return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+        except ValueError:
+            continue
+    return None
+
+
+def _data_do_elemento(el) -> datetime | None:
+    for attr in ("datetime", "data-date", "data-time",
+                 "data-published", "content", "data-created"):
+        v = el.get(attr, "")
+        if v:
+            dt = _parse_date_str(v)
+            if dt:
+                return dt
+    txt = el.get_text(" ", strip=True)
+    for pat in (_ISO_RE, _DATE_RE):
+        m = pat.search(txt)
+        if m:
+            dt = _parse_date_str(m.group(1))
+            if dt:
+                return dt
+    return None
+
+
+def _normalizar_url(href: str, base_url: str, dominio: str) -> str | None:
+    if not href:
+        return None
+    if any(s in href for s in _SKIP_STR):
+        return None
+    if href.startswith("//"):
+        href = "https:" + href
+    elif href.startswith("/"):
+        href = dominio + href
+    elif not href.startswith("http"):
+        href = urljoin(base_url, href)
+    path = urlparse(href).path
+    if any(path.lower().endswith(ext) for ext in _SKIP_EXT):
+        return None
+    # Mantém só URLs do mesmo domínio
+    base_host = urlparse(dominio).netloc.lstrip("www.")
+    link_host = urlparse(href).netloc.lstrip("www.")
+    if link_host and not link_host.endswith(base_host) and not base_host.endswith(link_host):
+        return None
+    return href
+
+
+def buscar_html(url: str) -> list[dict]:
+    """Scraping genérico: extrai artigos (título + link + data opcional)."""
+    resp = requests.get(url, headers=HEADERS, timeout=TIMEOUT)
+    resp.raise_for_status()
+
     try:
-        publicado = datetime(*published_parsed[:6], tzinfo=timezone.utc)
-    except (TypeError, ValueError):
-        return "recentemente"
-    segundos = int((datetime.now(timezone.utc) - publicado).total_seconds())
-    if segundos < 60:
-        return "agora mesmo"
-    minutos = segundos // 60
-    if minutos < 60:
-        return f"há {minutos} minuto" + ("s" if minutos != 1 else "")
-    horas = minutos // 60
-    if horas < 24:
-        return f"há {horas} hora" + ("s" if horas != 1 else "")
-    dias = horas // 24
-    return f"há {dias} dia" + ("s" if dias != 1 else "")
+        soup = BeautifulSoup(resp.content, "lxml")
+    except Exception:
+        soup = BeautifulSoup(resp.content, "html.parser")
+
+    dominio = f"{urlparse(url).scheme}://{urlparse(url).netloc}"
+    artigos, vistos = [], set()
+
+    # 1) Containers semânticos
+    containers = soup.find_all("article") or soup.find_all(
+        attrs={"class": re.compile(
+            r"(post|news|noticia|item|card|entry|story|feed|manchete)", re.I
+        )}
+    )
+    # 2) Fallback geral
+    if not containers:
+        containers = [soup.body or soup]
+
+    for container in containers:
+        a_tag = (
+            container
+            if container.name == "a" and container.get("href")
+            else container.find("a", href=True)
+        )
+        if not a_tag:
+            continue
+
+        href = _normalizar_url(a_tag.get("href", ""), url, dominio)
+        if not href or href in vistos:
+            continue
+        if len(urlparse(href).path.strip("/")) < 5:
+            continue
+        vistos.add(href)
+
+        heading = container.find(["h1", "h2", "h3", "h4"])
+        titulo  = (heading or a_tag).get_text(" ", strip=True)
+        if len(titulo) < 8:
+            continue
+
+        data = None
+        time_el = container.find("time")
+        if time_el:
+            data = _data_do_elemento(time_el)
+        if data is None:
+            for el in container.find_all(
+                ["span", "p", "div", "meta", "time"],
+                attrs={"class": re.compile(
+                    r"(date|time|quando|data|ago|update|posted|publish)", re.I
+                )},
+            ):
+                data = _data_do_elemento(el)
+                if data:
+                    break
+
+        artigos.append({"id": href, "titulo": titulo, "link": href, "data": data})
+
+    return artigos
 
 
-def montar_mensagem(time_info, noticia):
+# ─────────────────────────────────────────────────────────────
+#   FILTROS
+# ─────────────────────────────────────────────────────────────
+def passa_filtros(artigo: dict, time_info: dict, aplicar_palavras: bool) -> bool:
+    titulo = artigo.get("titulo", "").lower()
+
+    if aplicar_palavras:
+        chaves = time_info.get("palavras_chave", [])
+        if chaves and not any(p.lower() in titulo for p in chaves):
+            return False
+
+    for exc in time_info.get("exclui_palavras", []):
+        if exc.lower() in titulo:
+            return False
+
+    if not dentro_da_janela(artigo.get("data")):
+        return False
+
+    return True
+
+
+# ─────────────────────────────────────────────────────────────
+#   TELEGRAM
+# ─────────────────────────────────────────────────────────────
+def montar_mensagem(time_info: dict, artigo: dict) -> str:
     return (
-        f"{time_info['emoji']} <b>{html.escape(time_info['nome'])}</b>\n"
-        f"📰 {html.escape(noticia['titulo'])}\n"
-        f"🔗 {html.escape(noticia['link'])}\n"
-        f"⏰ Publicado {tempo_relativo(noticia['data'])}"
+        f"{time_info['emoji']} <b>{html_lib.escape(time_info['nome'])}</b>\n"
+        f"📰 {html_lib.escape(artigo['titulo'])}\n"
+        f"🔗 {html_lib.escape(artigo['link'])}\n"
+        f"⏰ {tempo_relativo(artigo['data'])}"
     )
 
 
-def enviar_telegram(texto, disable_preview=True):
-    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-    payload = {
-        "chat_id": TELEGRAM_CHAT_ID,
-        "text":    texto,
-        "parse_mode": "HTML",
-        "disable_web_page_preview": disable_preview,
-    }
-    resp  = requests.post(url, data=payload, timeout=TIMEOUT)
-    dados = resp.json()
+def enviar_telegram(texto: str):
+    r = requests.post(
+        f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
+        data={
+            "chat_id":                  TELEGRAM_CHAT_ID,
+            "text":                     texto,
+            "parse_mode":               "HTML",
+            "disable_web_page_preview": True,
+        },
+        timeout=TIMEOUT,
+    )
+    dados = r.json()
     if not dados.get("ok"):
-        raise RuntimeError(f"Telegram recusou: {dados.get('description')}")
-    return True
-
-# ============================================================
-#   CICLO
-# ============================================================
-def passa_no_filtro(noticia, time_info):
-    titulo = noticia["titulo"].lower()
-    exige  = time_info.get("exige_no_titulo")
-    if exige and not any(t.lower() in titulo for t in exige):
-        return False
-    exclui = time_info.get("exclui_no_titulo")
-    if exclui and any(t.lower() in titulo for t in exclui):
-        return False
-    return True
+        raise RuntimeError(f"Telegram rejeitou: {dados.get('description')}")
 
 
-def verificar_time(time_info, memoria):
-    nome = time_info["nome"]
-    primeira_vez_do_time = nome not in memoria
+# ─────────────────────────────────────────────────────────────
+#   MEMÓRIA
+# ─────────────────────────────────────────────────────────────
+def carregar_memoria() -> dict:
+    if MEMORIA_F.exists():
+        try:
+            with open(MEMORIA_F, encoding="utf-8") as f:
+                return {k: list(v) for k, v in json.load(f).items()}
+        except Exception as e:
+            log.warning("Memória corrompida (%s) — começando do zero.", e)
+    return {}
+
+
+def salvar_memoria(mem: dict):
+    dados = {k: v[-MAX_HIST:] for k, v in mem.items()}
+    tmp = MEMORIA_F.with_suffix(".tmp")
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(dados, f, ensure_ascii=False, indent=2)
+    tmp.replace(MEMORIA_F)
+
+
+# ─────────────────────────────────────────────────────────────
+#   CICLO PRINCIPAL
+# ─────────────────────────────────────────────────────────────
+def verificar_time(time_info: dict, memoria: dict) -> int:
+    nome       = time_info["nome"]
     vistos     = memoria.setdefault(nome, [])
     vistos_set = set(vistos)
+    encontrados: dict[str, dict] = {}
 
-    encontradas = {}
-    for query, lang in time_info["buscas"]:
+    for fonte in time_info["fontes"]:
+        url              = fonte["url"]
+        tipo             = fonte["tipo"]
+        aplicar_palavras = fonte.get("filtrar", True)
+
         try:
-            for n in buscar_noticias(query, lang):
-                encontradas.setdefault(n["id"], n)
+            artigos = buscar_rss(url) if tipo == "rss" else buscar_html(url)
+            log.info("    %s → %d artigo(s) bruto(s)", url, len(artigos))
+        except requests.HTTPError as e:
+            code = e.response.status_code if e.response else "?"
+            log.warning("    ✗ %s [HTTP %s]", url, code)
+            continue
         except requests.RequestException as e:
-            log.warning("    busca '%s' (%s) falhou: %s", query, lang, e)
+            log.warning("    ✗ %s [%s]", url, type(e).__name__)
+            continue
         except Exception as e:
-            log.warning("    erro inesperado na busca '%s' (%s): %s", query, lang, e)
+            log.warning("    ✗ %s [%s: %s]", url, type(e).__name__, e)
+            continue
 
-    agora = datetime.now(timezone.utc)
-    def recente(n):
-        if not n["data"]:
-            return True
-        try:
-            pub = datetime(*n["data"][:6], tzinfo=timezone.utc)
-            return (agora - pub).total_seconds() <= MAX_IDADE_HORAS * 3600
-        except (TypeError, ValueError):
-            return True
+        for art in artigos:
+            aid = art["id"]
+            if aid in vistos_set or aid in encontrados:
+                continue
+            if not passa_filtros(art, time_info, aplicar_palavras):
+                continue
+            encontrados[aid] = art
 
-    novas = [n for nid, n in encontradas.items()
-             if nid not in vistos_set and passa_no_filtro(n, time_info) and recente(n)]
-    novas.sort(key=lambda n: n["data"] or time.gmtime(0))
-
-    if primeira_vez_do_time:
-        for n in novas:
-            vistos.append(n["id"])
-        log.info("    %s %s: %d notícia(s) registradas (linha de base, sem enviar)",
-                 time_info["emoji"], nome, len(novas))
-        return 0
+    # Mais recente primeiro
+    novas = sorted(
+        encontrados.values(),
+        key=lambda a: to_utc(a["data"]) or datetime.min.replace(tzinfo=timezone.utc),
+        reverse=True,
+    )
 
     enviadas = 0
-    para_proximo = 0
-    for n in novas:
-        if enviadas >= MAX_NOTICIAS_POR_CICLO:
-            para_proximo += 1
-            continue
+    for art in novas:
+        if enviadas >= MAX_POR_CICLO:
+            log.info("    ↩ Limite %d atingido; %d ficam para o próximo ciclo.",
+                     MAX_POR_CICLO, len(novas) - enviadas)
+            break
         try:
-            enviar_telegram(montar_mensagem(time_info, n))
-            vistos.append(n["id"])
+            enviar_telegram(montar_mensagem(time_info, art))
+            vistos.append(art["id"])
             enviadas += 1
             time.sleep(1)
         except Exception as e:
-            log.error("    não consegui enviar '%s...': %s", n["titulo"][:50], e)
+            log.error("    ✗ Telegram: %s", e)
 
-    resumo = f"    {time_info['emoji']} {nome}: {len(novas)} nova(s)"
-    if enviadas:
-        resumo += f", {enviadas} enviada(s)"
-    if para_proximo:
-        resumo += f", {para_proximo} para o próximo ciclo"
-    if not novas:
-        resumo += " — nada novo"
-    log.info(resumo)
+    log.info("  %s %s → %d nova(s), %d enviada(s).",
+             time_info["emoji"], nome, len(novas), enviadas)
     return enviadas
 
 
-def rodar_ciclo(memoria):
+def rodar_ciclo(memoria: dict) -> int:
     total = 0
     for time_info in TIMES:
-        log.info("  Verificando %s %s ...", time_info["emoji"], time_info["nome"])
+        log.info("Verificando %s %s ...", time_info["emoji"], time_info["nome"])
         try:
             total += verificar_time(time_info, memoria)
         except Exception as e:
-            log.exception("  Erro ao verificar %s: %s", time_info["nome"], e)
+            log.exception("Erro em %s: %s", time_info["nome"], e)
     salvar_memoria(memoria)
     return total
 
-# ============================================================
-#   PONTO DE ENTRADA — um ciclo e sai
-# ============================================================
+
+# ─────────────────────────────────────────────────────────────
+#   PONTO DE ENTRADA
+# ─────────────────────────────────────────────────────────────
 if __name__ == "__main__":
     log.info("=" * 60)
-    log.info("  MONITOR — ciclo único (GitHub Actions)")
-    log.info("  %s", datetime.now(timezone.utc).strftime("%d/%m/%Y %H:%M:%S UTC"))
+    log.info("  MONITOR v2 — ciclo único (GitHub Actions)")
+    log.info("  %s", agora_utc().strftime("%d/%m/%Y %H:%M:%S UTC"))
+    log.info("  Janela: últimas %d horas", JANELA_HORAS)
     log.info("=" * 60)
-
     memoria = carregar_memoria()
-    primeira_execucao = not memoria
-
-    if primeira_execucao:
-        log.info("Primeira execução: registrando notícias atuais como já vistas.")
-        log.info("A partir do próximo ciclo, só novidades serão enviadas.")
-
-    total = rodar_ciclo(memoria)
+    total   = rodar_ciclo(memoria)
     log.info("Ciclo concluído — %d notícia(s) enviada(s).", total)
