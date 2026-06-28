@@ -1,0 +1,41 @@
+name: Monitor de Times
+
+on:
+  schedule:
+    - cron: '*/15 * * * *'   # a cada 15 minutos
+  workflow_dispatch:           # botão manual para rodar na hora
+
+permissions:
+  contents: write              # permite fazer git commit do já_visto.json
+
+jobs:
+  monitorar:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Baixar o repositório
+        uses: actions/checkout@v4
+
+      - name: Configurar Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Instalar dependências
+        run: pip install feedparser requests
+
+      - name: Rodar o monitor
+        env:
+          TELEGRAM_TOKEN:   ${{ secrets.TELEGRAM_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: python monitor_cloud.py
+
+      - name: Salvar memória (já_visto.json)
+        run: |
+          git config user.name  "Monitor Bot"
+          git config user.email "monitor@github-actions"
+          git add já_visto.json
+          git diff --staged --quiet || git commit -m "chore: atualiza já_visto.json [skip ci]"
+          git push

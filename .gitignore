@@ -1,0 +1,14 @@
+# Segredos — nunca sobe para o GitHub
+config.py
+
+# Logs locais
+monitor.log
+*.log
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# Temporários
+*.tmp
