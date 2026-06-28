@@ -42,7 +42,7 @@ TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "").strip()
 if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
     sys.exit("Defina TELEGRAM_TOKEN e TELEGRAM_CHAT_ID como GitHub Secrets.")
 
-JANELA_HORAS  = 24    # só envia notícias publicadas nas últimas 24 h
+JANELA_HORAS  = 2     # só envia notícias publicadas nas últimas 2 h
 MAX_POR_CICLO = 6     # máximo de alertas por time por execução
 MAX_HIST      = 500   # máximo de IDs guardados por time no já_visto.json
 TIMEOUT       = 20
