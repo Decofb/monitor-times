@@ -246,6 +246,43 @@ def _parse_date_str(s: str) -> datetime | None:
     return None
 
 
+_REL_NUM_RE = re.compile(r'(\d+)')
+
+
+def _parse_relative_date(txt: str) -> datetime | None:
+    """Parse datas relativas PT-BR/EN: '2 dias atrás', '3h ago', 'ontem', etc."""
+    t = txt.lower().strip()
+    now = agora_utc()
+    m = re.search(r'(\d+)\s*dia', t)
+    if m:
+        return now - timedelta(days=int(m.group(1)))
+    m = re.search(r'(\d+)\s*hora', t)
+    if m:
+        return now - timedelta(hours=int(m.group(1)))
+    m = re.search(r'(\d+)\s*min', t)
+    if m:
+        return now - timedelta(minutes=int(m.group(1)))
+    m = re.search(r'(\d+)\s*semana', t)
+    if m:
+        return now - timedelta(weeks=int(m.group(1)))
+    if any(w in t for w in ('ontem', 'yesterday')):
+        return now - timedelta(days=1)
+    if any(w in t for w in ('days ago', 'day ago')):
+        m = _REL_NUM_RE.search(t)
+        if m:
+            return now - timedelta(days=int(m.group(1)))
+    if any(w in t for w in ('hours ago', 'hour ago')):
+        m = _REL_NUM_RE.search(t)
+        if m:
+            return now - timedelta(hours=int(m.group(1)))
+    # Fallback genérico: qualquer "N atrás" ou "N ago" → assume dias
+    if 'ago' in t or 'atrás' in t or 'atras' in t:
+        m = _REL_NUM_RE.search(t)
+        if m:
+            return now - timedelta(days=int(m.group(1)))
+    return None
+
+
 def _data_do_elemento(el) -> datetime | None:
     for attr in ("datetime", "data-date", "data-time",
                  "data-published", "content", "data-created"):
@@ -261,7 +298,8 @@ def _data_do_elemento(el) -> datetime | None:
             dt = _parse_date_str(m.group(1))
             if dt:
                 return dt
-    return None
+    # Última tentativa: data relativa em texto ("2 dias atrás", "3h ago", etc.)
+    return _parse_relative_date(txt)
 
 
 def _normalizar_url(href: str, base_url: str, dominio: str) -> str | None:
@@ -372,12 +410,40 @@ def passa_filtros(artigo: dict, time_info: dict, aplicar_palavras: bool) -> bool
 
 
 # ─────────────────────────────────────────────────────────────
+#   TRADUÇÃO AUTOMÁTICA
+# ─────────────────────────────────────────────────────────────
+def _traduzir_para_pt(titulo: str) -> str:
+    """Detecta o idioma do título e traduz para PT se necessário."""
+    try:
+        from langdetect import detect, LangDetectException
+        try:
+            lang = detect(titulo)
+        except LangDetectException:
+            return titulo
+        if lang in ("pt",):
+            return titulo
+        from deep_translator import GoogleTranslator
+        traduzido = GoogleTranslator(source="auto", target="pt").translate(titulo)
+        return traduzido or titulo
+    except Exception as e:
+        log.debug("Tradução falhou (%s) — usando original.", e)
+        return titulo
+
+
+# ─────────────────────────────────────────────────────────────
 #   TELEGRAM
 # ─────────────────────────────────────────────────────────────
 def montar_mensagem(time_info: dict, artigo: dict) -> str:
+    titulo_original  = artigo["titulo"]
+    titulo_exibido   = _traduzir_para_pt(titulo_original)
+    # Se houve tradução, mostra o original entre parênteses
+    if titulo_exibido.lower().strip() != titulo_original.lower().strip():
+        titulo_linha = f"{html_lib.escape(titulo_exibido)}"
+    else:
+        titulo_linha = html_lib.escape(titulo_original)
     return (
         f"{time_info['emoji']} <b>{html_lib.escape(time_info['nome'])}</b>\n"
-        f"📰 {html_lib.escape(artigo['titulo'])}\n"
+        f"📰 {titulo_linha}\n"
         f"🔗 {html_lib.escape(artigo['link'])}\n"
         f"⏰ {tempo_relativo(artigo['data'])}"
     )
