@@ -81,6 +81,12 @@ TIMES = [
         "nome": "AVAI FC",
         "emoji": "⚽",
         "palavras_chave": ["Avaí", "Avai"],
+        "exclui_palavras": [
+            "feminino", "feminina", "sub-", "sub20", "sub17", "sub15", "sub13", "sub11",
+            "base", "categoria de base", "infantil", "juvenil", "junior", "júnior",
+            "women", "woman", "girl", "girls", "ladies", "WSL", "academy",
+            "u21", "u20", "u18", "u17", "u16", "u15", "u14", "U-", "equipe B", "reservas",
+        ],
         "fontes": [
             # ── RSS (preferencial) ──────────────────────────
             {"url": "https://ge.globo.com/dynamo/globoesporte/futebol/times/rss20/avai.xml",
@@ -102,6 +108,12 @@ TIMES = [
         "nome": "CHELSEA FC",
         "emoji": "🔵",
         "palavras_chave": ["Chelsea"],
+        "exclui_palavras": [
+            "feminino", "feminina", "sub-", "sub20", "sub17", "sub15", "sub13", "sub11",
+            "base", "categoria de base", "infantil", "juvenil", "junior", "júnior",
+            "women", "woman", "girl", "girls", "ladies", "WSL", "academy",
+            "u21", "u20", "u18", "u17", "u16", "u15", "u14", "U-", "equipe B", "reservas",
+        ],
         "fontes": [
             {"url": "https://www.chelseafcbrasil.com/feed/",
              "tipo": "rss",  "filtrar": False},
