@@ -45,6 +45,8 @@ if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
 # Proxy Cloudflare Worker — contorna bloqueios de IP do GitHub Actions
 PROXY_URL    = "https://monitor-proxy.brandes-andre1.workers.dev"
 PROXY_SECRET = os.environ.get("PROXY_SECRET", "").strip()
+if not PROXY_SECRET and os.environ.get("GITHUB_ACTIONS"):
+    print("⚠️  PROXY_SECRET não definido — fontes com bloqueio de IP do GitHub falharão silenciosamente.", flush=True)
 
 JANELA_HORAS  = 4     # só envia notícias publicadas nas últimas 4 h
 MAX_POR_CICLO = 6     # máximo de alertas por time por execução
@@ -88,10 +90,9 @@ TIMES = [
         "palavras_chave": ["Avaí", "Avai"],
         "exclui_palavras": [
             "feminino", "feminina", "sub-", "sub20", "sub17", "sub15", "sub13", "sub11",
-            "base", "categoria de base", "infantil", "juvenil", "junior", "júnior",
+            "categoria de base", "infantil", "juvenil",
             "women", "woman", "girl", "girls", "ladies", "WSL", "academy",
-            "u21", "u20", "u18", "u17", "u16", "u15", "u14", "U-", "equipe B", "reservas",
-            "jovem", "jovens",
+            "u21", "u20", "u18", "u17", "u16", "u15", "u14", "U-", "equipe B",
         ],
         "exclui_urls": ["/feminino/", "/women/", "/sub-", "/base/", "/academy/"],
         "fontes": [
@@ -119,10 +120,9 @@ TIMES = [
         "palavras_chave": ["Chelsea"],
         "exclui_palavras": [
             "feminino", "feminina", "sub-", "sub20", "sub17", "sub15", "sub13", "sub11",
-            "base", "categoria de base", "infantil", "juvenil", "junior", "júnior",
+            "categoria de base", "infantil", "juvenil",
             "women", "woman", "girl", "girls", "ladies", "WSL", "academy",
-            "u21", "u20", "u18", "u17", "u16", "u15", "u14", "U-", "equipe B", "reservas",
-            "jovem", "jovens",
+            "u21", "u20", "u18", "u17", "u16", "u15", "u14", "U-", "equipe B",
         ],
         "exclui_urls": ["/feminino/", "/women/", "/sub-", "/base/", "/academy/", "women", "feminino"],
         "exclui_categorias": ["Chelsea FC Women", "Academia"],
@@ -202,7 +202,7 @@ def dentro_da_janela(data) -> bool:
     """True se a data está dentro das últimas JANELA_HORAS horas."""
     dt = to_utc(data)
     if dt is None:
-        return True     # sem data → inclui (não descarta por precaução)
+        return False    # sem data → descarta (evita artigos antigos de scraping HTML)
     return (agora_utc() - dt) <= timedelta(hours=JANELA_HORAS)
 
 
@@ -428,7 +428,7 @@ def buscar_html(url: str) -> list[dict]:
                 if data:
                     break
 
-        artigos.append({"id": href, "titulo": titulo, "link": href, "data": data})
+        artigos.append({"id": href, "titulo": titulo, "link": href, "data": data, "categorias": []})
 
     return artigos
 
@@ -558,14 +558,22 @@ def enviar_telegram(texto: str, link: str = ""):
     if teclado:
         payload["reply_markup"] = teclado
 
-    r = requests.post(
-        f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
-        data=payload,
-        timeout=TIMEOUT,
-    )
-    dados = r.json()
-    if not dados.get("ok"):
+    for tentativa in range(2):
+        r = requests.post(
+            f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
+            data=payload,
+            timeout=TIMEOUT,
+        )
+        dados = r.json()
+        if dados.get("ok"):
+            return
+        if r.status_code == 429:
+            espera = dados.get("parameters", {}).get("retry_after", 30)
+            log.warning("Telegram rate limit — aguardando %ds antes de retentar.", espera)
+            time.sleep(espera + 1)
+            continue
         raise RuntimeError(f"Telegram rejeitou: {dados.get('description')}")
+    raise RuntimeError("Telegram rejeitou após retry (429)")
 
 
 # ─────────────────────────────────────────────────────────────
@@ -680,15 +688,18 @@ def rodar_ciclo(memoria: dict) -> dict:
 
 
 def gravar_log(resultados: dict):
-    """Acrescenta uma linha no log.txt com os totais do ciclo."""
+    """Mantém log.txt com no máximo 500 linhas (rotação automática)."""
     try:
         partes = " | ".join(
             f"{nome.split()[0].capitalize()}: {n}"
             for nome, n in resultados.items()
         )
         linha = f"{agora_utc().strftime('%Y-%m-%d %H:%M')} UTC | {partes}\n"
-        with open(LOG_F, "a", encoding="utf-8") as f:
-            f.write(linha)
+        linhas = LOG_F.read_text(encoding="utf-8").splitlines(keepends=True) if LOG_F.exists() else []
+        linhas.append(linha)
+        if len(linhas) > 500:
+            linhas = linhas[-500:]
+        LOG_F.write_text("".join(linhas), encoding="utf-8")
     except Exception as e:
         log.warning("Não consegui gravar log.txt: %s", e)
 

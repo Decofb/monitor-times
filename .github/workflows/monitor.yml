@@ -5,6 +5,10 @@ on:
     - cron: '*/15 * * * *'   # a cada 15 minutos
   workflow_dispatch:           # botão manual para rodar na hora
 
+concurrency:
+  group: monitor
+  cancel-in-progress: false   # não cancela runs em andamento; enfileira
+
 permissions:
   contents: write              # permite fazer git commit do já_visto.json
 
@@ -34,9 +38,10 @@ jobs:
         run: python monitor_cloud.py
 
       - name: Salvar memória e log
+        if: always()
         run: |
           git config user.name  "Monitor Bot"
           git config user.email "monitor@github-actions"
           git add já_visto.json log.txt || true
           git diff --staged --quiet || git commit -m "chore: atualiza memória e log [skip ci]"
-          git pull --rebase && git push
+          git pull --rebase && git push || (git pull --rebase && git push)
