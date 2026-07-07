@@ -1,5 +1,4 @@
 2026-07-07 13:42 UTC | Avai: 0 | Chelsea: 0 | Pittsburgh: 0 | Legacy: 0
-2026-07-07 13:42 UTC | Avai: 0 | Chelsea: 0 | Pittsburgh: 0 | Legacy: 0
 2026-07-07 13:43 UTC | Avai: 0 | Chelsea: 0 | Pittsburgh: 0 | Legacy: 0
 2026-07-07 13:44 UTC | Avai: 0 | Chelsea: 0 | Pittsburgh: 0 | Legacy: 0
 2026-07-07 13:45 UTC | Avai: 0 | Chelsea: 0 | Pittsburgh: 0 | Legacy: 0
@@ -498,3 +497,4 @@
 2026-07-07 21:59 UTC | Avai: 0 | Chelsea: 0 | Pittsburgh: 0 | Legacy: 0
 2026-07-07 22:00 UTC | Avai: 0 | Chelsea: 0 | Pittsburgh: 0 | Legacy: 0
 2026-07-07 22:02 UTC | Avai: 0 | Chelsea: 0 | Pittsburgh: 1 | Legacy: 0
+2026-07-07 22:03 UTC | Avai: 0 | Chelsea: 0 | Pittsburgh: 0 | Legacy: 0
