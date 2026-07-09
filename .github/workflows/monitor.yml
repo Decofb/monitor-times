@@ -20,6 +20,13 @@ jobs:
     steps:
       - name: Baixar o repositório
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0            # histórico completo — o rebase da memória precisa disso
+
+      - name: Configurar Git
+        run: |
+          git config user.name  "Monitor Bot"
+          git config user.email "monitor@github-actions"
 
       - name: Configurar Python
         uses: actions/setup-python@v5
@@ -30,6 +37,12 @@ jobs:
       - name: Instalar dependências
         run: pip install -r requirements.txt
 
+      # Puxa a memória mais recente ANTES de rodar. Se uma execução anterior
+      # salvou o já_visto.json depois do checkout desta, pegamos aqui — assim o
+      # monitor decide o que enviar com a memória mais atual possível.
+      - name: Sincronizar memória mais recente
+        run: git pull --rebase origin main || true
+
       - name: Rodar o monitor
         env:
           TELEGRAM_TOKEN:   ${{ secrets.TELEGRAM_TOKEN }}
@@ -37,12 +50,26 @@ jobs:
           PROXY_SECRET:     ${{ secrets.PROXY_SECRET }}
         run: python monitor_cloud.py
 
+      # Salva a memória com retry de verdade. Antes, um push que falhava era
+      # engolido (|| true + continue-on-error) e a memória era PERDIDA — a
+      # execução seguinte reenviava as mesmas notícias. Agora insistimos até 5x
+      # e, se ainda assim falhar, o job fica vermelho para você perceber.
       - name: Salvar memória e log
         if: always()
-        continue-on-error: true
         run: |
-          git config user.name  "Monitor Bot"
-          git config user.email "monitor@github-actions"
-          git add já_visto.json log.txt || true
-          git diff --staged --quiet || git commit -m "chore: atualiza memória e log [skip ci]"
-          git pull --rebase && git push || (git pull --rebase && git push) || true
+          git add já_visto.json log.txt
+          if git diff --staged --quiet; then
+            echo "Sem mudanças na memória — nada a salvar."
+            exit 0
+          fi
+          git commit -m "chore: atualiza memória e log [skip ci]"
+          for i in 1 2 3 4 5; do
+            if git pull --rebase origin main && git push origin HEAD:main; then
+              echo "Memória salva com sucesso (tentativa $i)."
+              exit 0
+            fi
+            echo "Tentativa $i de salvar a memória falhou; aguardando antes de retentar..."
+            sleep $((RANDOM % 4 + 3))
+          done
+          echo "::error::Não consegui salvar a memória após 5 tentativas — a próxima execução pode repetir notícias."
+          exit 1
