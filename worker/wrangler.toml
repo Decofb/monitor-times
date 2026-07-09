@@ -1,0 +1,20 @@
+name = "monitor-news"
+main = "src/index.js"
+compatibility_date = "2025-06-01"
+compatibility_flags = ["nodejs_compat"]
+
+# URL pública (…workers.dev) útil para acionar um ciclo manual com ?run=1.
+workers_dev = true
+
+# Roda de 1 em 1 minuto — quase em tempo real.
+[triggers]
+crons = ["* * * * *"]
+
+# Memória anti-duplicação (KV). O id é preenchido pelo deploy (ver README-worker).
+[[kv_namespaces]]
+binding = "MEMORIA"
+id = "bf2fed50299e4733a62f03763ffa2d70"
+
+[vars]
+# "true" = não envia nada, só loga o que enviaria (para testar com segurança).
+DRY_RUN = "false"
