@@ -38,10 +38,9 @@ const TIMES = [
     ],
     exclui_urls: ["/feminino/", "/women/", "/sub-", "/base/", "/academy/"],
     fontes: [
-      { url: "https://ge.globo.com/dynamo/globoesporte/futebol/times/rss20/avai.xml", tipo: "rss", filtrar: false },
+      // ge.globo matou o RSS por time; a página HTML do time é a fonte ge viva.
       { url: "https://ndmais.com.br/tag/avai/feed/", tipo: "rss", filtrar: false },
       { url: "https://avai.com.br/noticias/feed/", tipo: "rss", filtrar: false },
-      { url: "https://ge.globo.com/futebol/transferencias/rss20/index.xml", tipo: "rss", filtrar: true },
       { url: "https://ge.globo.com/sc/futebol/times/avai/", tipo: "html", filtrar: true },
       { url: "https://avai.com.br/noticias/", tipo: "html", filtrar: true },
       { url: "https://ndmais.com.br/tag/avai/", tipo: "html", filtrar: true },
@@ -61,8 +60,8 @@ const TIMES = [
     exclui_categorias: ["Chelsea FC Women", "Academia"],
     fontes: [
       { url: "https://www.chelseafcbrasil.com/feed/", tipo: "rss", filtrar: false },
-      { url: "https://ge.globo.com/futebol/transferencias/rss20/index.xml", tipo: "rss", filtrar: true },
       { url: "https://www.chelseafcbrasil.com", tipo: "html", filtrar: true },
+      // ogol tem proteção anti-bot e às vezes bloqueia (403); entra como bônus.
       { url: "https://www.ogol.com.br/equipe/chelsea/noticias", tipo: "html", filtrar: true },
     ],
   },
@@ -71,10 +70,10 @@ const TIMES = [
     emoji: "🏈",
     palavras_chave: ["Steelers", "Pittsburgh"],
     fontes: [
-      { url: "https://www.steelers.com/rss/news_feed.rss", tipo: "rss", filtrar: false, lang: "en" },
+      { url: "https://www.steelers.com/rss/news", tipo: "rss", filtrar: false, lang: "en" },
       { url: "https://steelersdepot.com/feed/", tipo: "rss", filtrar: false, lang: "en" },
       { url: "https://steelersnow.com/feed/", tipo: "rss", filtrar: false, lang: "en" },
-      { url: "https://www.behindthesteelcurtain.com/rss/current", tipo: "rss", filtrar: false, lang: "en" },
+      { url: "https://www.behindthesteelcurtain.com/rss/index.xml", tipo: "rss", filtrar: false, lang: "en" },
       { url: "https://www.espn.com.br/nfl/time/_/nome/pit/pittsburgh-steelers", tipo: "html", filtrar: true },
       { url: "https://www.nfl.com/teams/pittsburgh-steelers/", tipo: "html", filtrar: true, lang: "en" },
     ],
@@ -86,7 +85,7 @@ const TIMES = [
     exclui_palavras: ["Hogwarts", "Tomb Raider", "Plague Tale", "Starfall", "Harry Potter"],
     fontes: [
       { url: "https://retakecs.com/noticias/feed/", tipo: "rss", filtrar: true },
-      { url: "https://www.dust2.com.br/feed/", tipo: "rss", filtrar: true },
+      { url: "https://www.dust2.com.br/rss", tipo: "rss", filtrar: true },
       { url: "https://retakecs.com/noticias/", tipo: "html", filtrar: true },
       { url: "https://draft5.gg", tipo: "html", filtrar: true },
       { url: "https://www.dust2.com.br", tipo: "html", filtrar: true },
@@ -465,6 +464,7 @@ async function verificarTime(time, memoria, env, dryRun) {
     time.fontes.map(async (fonte) => {
       try {
         const artigos = fonte.tipo === "rss" ? await buscarRss(fonte.url) : await buscarHtml(fonte.url);
+        console.log(`  ✓ ${fonte.url} → ${artigos.length}`);
         return { fonte, artigos };
       } catch (e) {
         console.warn(`  ✗ ${fonte.url} [${e.message}]`);
