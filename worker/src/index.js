@@ -61,8 +61,6 @@ const TIMES = [
     fontes: [
       { url: "https://www.chelseafcbrasil.com/feed/", tipo: "rss", filtrar: false },
       { url: "https://www.chelseafcbrasil.com", tipo: "html", filtrar: true },
-      // ogol tem proteção anti-bot e às vezes bloqueia (403); entra como bônus.
-      { url: "https://www.ogol.com.br/equipe/chelsea/noticias", tipo: "html", filtrar: true },
     ],
   },
   {
